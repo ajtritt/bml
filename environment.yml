@@ -1,0 +1,12 @@
+channels:
+  - defaults
+dependencies:
+  - matplotlib
+  - scikit-learn
+  - seaborn
+  - scipy
+  - h5py[version='>=3.7',build=*mpich*]
+  - numpy
+  - ipykernel
+  - pandas
+  - yt
