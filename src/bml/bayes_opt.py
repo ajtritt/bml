@@ -19,8 +19,8 @@ import tqdm
 import yt
 
 
-def write_job(f, base_outdir, job_name="ferroX", job_time=240, inputs_name="inputc", max_iter=100):
-    with open(files(__package__).joinpath('config.toml'), 'rb') as conf_f:
+def write_job(config, f, base_outdir, data_dir, job_name="ferroX", job_time=240, inputs_name="inputc", max_iter=100):
+    with open(config, 'rb') as conf_f:
         conf = tomllib.load(conf_f)
     exe_path = os.path.expandvars(conf['exe_path'])
     project = conf['nersc_project']
@@ -40,7 +40,7 @@ cd {base_outdir}.$SLURM_JOB_ID
 export SLURM_CPU_BIND="cores"
 srun {exe_path} {inputs_name}
 cd {os.getcwd()}
-bayes-opt -I {max_iter} ."""
+bayes-opt -I {max_iter} {data_dir} {config}"""
     f.write(SCRIPT)
 
 
@@ -132,31 +132,38 @@ def get_design_params(inputs):
     return ret
 
 
-def new_inputs(dp):
+def new_inputs(dp, range_df):
     inputs = dict()
 
     dp = dp.copy()
-    for k in ('L_z_SC', 'L_z_DE', 'L_z_FE'):
-        dp[k] = round(dp[k] * 2e9) / 2e9
+    for k in ('L_z_SC', 'L_z_DE', 'L_z_FE', 'L_x', 'L_y'):
+        res = 1 / range_df['step'][k]
+        dp[k] = round(dp[k] * res) / res
 
-    inputs['SC_lo'] = 0.0
-    inputs['SC_hi'] = dp['L_z_SC']
-    inputs['DE_lo'] = inputs['SC_hi']
-    inputs['DE_hi'] = inputs['DE_lo'] + dp['L_z_DE']
-    inputs['FE_lo'] = inputs['DE_hi']
-    inputs['FE_hi'] = inputs['FE_lo'] + dp['L_z_FE']
+    x = dp['L_x'] / 2
+    y = dp['L_y'] / 2
 
-    inputs['domain.prob_lo'] = [-dp['L_x'] / 2, -dp['L_y'] / 2, 0.0]
-    inputs['domain.prob_hi'] = [ dp['L_x'] / 2,  dp['L_y'] / 2, inputs['FE_hi']]
+    inputs['SC_lo'] = [ -x, -y, 0.0 ]
+    inputs['SC_hi'] = [  x,  y, dp['L_z_SC'] ]
+    inputs['DE_lo'] = [ -x, -y, inputs['SC_hi'][2] ]
+    inputs['DE_hi'] = [  x,  y, inputs['DE_lo'][2] + dp['L_z_DE'] ]
+    inputs['FE_lo'] = [ -x, -y, inputs['DE_hi'][2] ]
+    inputs['FE_hi'] = [  x,  y, inputs['FE_lo'][2] + dp['L_z_FE'] ]
+
+
+    inputs['domain.prob_lo'] = [ -x, -y, 0.0 ]
+    inputs['domain.prob_hi'] = [  x,  y, inputs['FE_hi'][2] ]
 
 
     inputs['domain.n_cell'] = [int((inputs['domain.prob_hi'][i] - inputs['domain.prob_lo'][i]) / 0.5e-9) for i in range(len(inputs['domain.prob_lo']))]
+
+    inputs['phi_tolerance'] = 5e-05
 
     copy_keys(dp, inputs)
     return inputs
 
 
-def read_ferroX_data(data_dir, inputs_name):
+def read_ferroX_data(data_dir, inputs_name, ignore_cache=False):
     yt.utilities.logger.set_log_level('warning')
 
     all_names = list()
@@ -194,8 +201,9 @@ def read_ferroX_data(data_dir, inputs_name):
             continue
 
 
+        design_params.append(get_design_params(inputs))
         cache_path = f"{design_dir}/bayes-opt.npz"
-        if os.path.exists(cache_path):
+        if os.path.exists(cache_path) and not ignore_cache:
             npz = np.load(cache_path)
             Q = npz['Q']
             V_fe_avg = npz['V_fe_avg']
@@ -221,7 +229,6 @@ def read_ferroX_data(data_dir, inputs_name):
 
             np.savez(cache_path, Q=Q, V_fe_avg=V_fe_avg, Phi_S=Phi_S)
 
-        design_params.append(get_design_params(inputs))
         all_V_app.append(np.array(V_app))
         all_Q.append(np.array(Q))
         all_V_fe_avg.append(np.array(V_fe_avg))
@@ -292,7 +299,7 @@ def fmt_param(param):
         raise ValueError(f"Got value of type {type(param)}")
 
 
-def submit_workflow(inputs, outdir, job_name, job_name_prefix="ferroX_", submit=True, inputs_name="inputc",
+def submit_workflow(config, inputs, outdir, job_name, data_dir, job_name_prefix="ferroX_", submit=True, inputs_name="inputc",
                     max_iter=100):
     inputs_f = tempfile.NamedTemporaryFile('w', prefix='inputs')
     inputs_path = inputs_f.name
@@ -303,7 +310,7 @@ def submit_workflow(inputs, outdir, job_name, job_name_prefix="ferroX_", submit=
     sh_f = tempfile.NamedTemporaryFile('w', suffix='.sh')
     sh_path = sh_f.name
     base_outdir = os.path.join(outdir, job_name)
-    write_job(sh_f, base_outdir, job_name=f"{job_name_prefix}{job_name}", inputs_name=inputs_name, max_iter=max_iter)
+    write_job(config, sh_f, base_outdir, data_dir, job_name=f"{job_name_prefix}{job_name}", inputs_name=inputs_name, max_iter=max_iter)
     sh_f.flush()
 
     outdir = sh_path
@@ -343,10 +350,11 @@ def _submit_job(path):
     return ret
 
 
-def run(data_dir, outdir, seed, job_prefix="ferroX_", inputs_name="inputc", debug=False, max_iter=100):
+def run(config, data_dir, outdir, seed, job_prefix="ferroX_", inputs_name="inputc", debug=False, max_iter=100, ignore_cache=False):
     print(f"Using seed {seed}", file=sys.stderr)
     print("Reading FerroX data", file=sys.stderr)
-    design_params, V_app, Q, V_fe_avg, Phi_S, inputs_tmpl = read_ferroX_data(data_dir, inputs_name)
+    design_params, V_app, Q, V_fe_avg, Phi_S, inputs_tmpl = read_ferroX_data(data_dir, inputs_name,
+                                                                             ignore_cache=ignore_cache)
     print("done", file=sys.stderr)
     it = len(V_app)
 
@@ -359,7 +367,7 @@ def run(data_dir, outdir, seed, job_prefix="ferroX_", inputs_name="inputc", debu
     response = np.max(dPhiS_dVapp, axis=1)
 
     bounds_df = pd.DataFrame([design_params.min(axis=0), design_params.max(axis=0)], index=['min', 'max']).T
-    with open(files(__package__).joinpath('config.toml'), 'rb') as f:
+    with open(config, 'rb') as f:
         range_df = pd.DataFrame(tomllib.load(f)['param']).T
     #range_df = pd.read_csv(files(__package__).joinpath('data/ranges.csv'), index_col=0)
     bounds_df.update(range_df)
@@ -367,9 +375,9 @@ def run(data_dir, outdir, seed, job_prefix="ferroX_", inputs_name="inputc", debu
 
     next_sample = get_next_sample(design_params, response, bounds)
 
-    inputs_tmpl.update(new_inputs(dict(zip(design_params.columns, next_sample))))
+    inputs_tmpl.update(new_inputs(dict(zip(design_params.columns, next_sample)), range_df))
 
-    submit_workflow(inputs_tmpl, outdir, f"it{it:05d}", job_name_prefix=job_prefix, submit=not debug,
+    submit_workflow(config, inputs_tmpl, outdir, f"it{it:05d}", data_dir, job_name_prefix=job_prefix, submit=not debug,
                     inputs_name=inputs_name, max_iter=max_iter)
 
 
@@ -377,6 +385,7 @@ def main(argv=None):
     import argparse
 
     parser = argparse.ArgumentParser()
+    parser.add_argument('config', help='the config file to use for optimization')
     parser.add_argument('data_dir', help='the data directory with FerroX runs')
     parser.add_argument('-s', '--seed', type=parse_seed, help='the random number seed to use', default='')
     parser.add_argument('-o', '--outdir', type=str, help='the base directory for submitting job from', default=None)
@@ -384,12 +393,11 @@ def main(argv=None):
     parser.add_argument('-i', '--inputs_name', type=str, help='the name of the inputs file', default='inputc')
     parser.add_argument('-j', '--job_prefix', type=str, help='the job name prefix to use', default='ferroX_')
     parser.add_argument('-I', '--max_iter', type=int, help='the maximum number of iterations to do', default=100)
+    parser.add_argument('-c', '--ignore_cache', action='store_true', help='ignore processed FerroX data cache', default=False)
 
     args = parser.parse_args(argv)
     if args.outdir is None:
         args.outdir = os.path.abspath(args.data_dir)
 
-    run(args.data_dir, args.outdir, args.seed, job_prefix=args.job_prefix, inputs_name=args.inputs_name,
-        debug=args.debug, max_iter=args.max_iter)
-
-
+    run(args.config, args.data_dir, args.outdir, args.seed, job_prefix=args.job_prefix, inputs_name=args.inputs_name,
+        debug=args.debug, max_iter=args.max_iter, ignore_cache=args.ignore_cache)
