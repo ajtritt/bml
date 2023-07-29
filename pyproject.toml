@@ -40,7 +40,7 @@ dependencies = [
 dynamic = ["version"]
 
 [tool.setuptools.package-data]
-bml = ["config.toml"]
+bml = ["inputs"]
 
 [project.scripts]
 bayes-opt = "bml.bayes_opt:main"
