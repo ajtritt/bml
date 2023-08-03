@@ -44,3 +44,4 @@ bml = ["inputs"]
 
 [project.scripts]
 bayes-opt = "bml.bayes_opt:main"
+bayes-opt-init = "bml.init:main"

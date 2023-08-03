@@ -1,13 +1,9 @@
 import glob
 from importlib.resources import files
 import os
-import re
 import shutil
 import subprocess
 import sys
-import tempfile
-from time import time
-import tomllib
 import warnings
 
 import numpy as np
@@ -18,8 +14,11 @@ import scipy.stats as st
 import tqdm
 import yt
 
+from .objective import DPhiSOverDVapp
+from .job import ChainJobWriter
+from .utils import get_input_params, load_config, read_inputs, get_default_inputs, parse_seed, round_sample, write_params
 
-def write_job(config, f, base_outdir, data_dir, job_name="ferroX", job_time=240, inputs_name="inputc", max_iter=100):
+def write_job(config, f, base_outdir, job_name="ferroX", job_time=240, inputs_name="inputc"):
     exe_path = os.path.expandvars(config['exe_path'])
     project = config['nersc_project']
 
@@ -42,76 +41,45 @@ cd {os.getcwd()}
     f.write(SCRIPT)
 
 
-def parse_seed(string):
-    if string:
-        try:
-            i = int(string)
-            if i > 2**32 - 1:
-                raise ValueError(string)
-            return i
-        except :
-            raise argparse.ArgumentTypeError(f'{string} is not a valid seed')
-    else:
-        return int(int(time() * 1e6) % 1e6)
+def calculate_values(plt_path, V_app, inputs, default_l=32e9):
+    ds = yt.load(plt_path)
+    ad = ds.all_data()
 
-
-def calculate_values(ad, V_app, inputs):
     shape = tuple(inputs['domain.n_cell'][:-1])
-
-    if not shape == (64, 64):
-        raise ValueError(f"Expected xy dimensions of (64, 64), got {shape}")
 
     P_array = ad['Pz'].to_ndarray().reshape(ad.ds.domain_dimensions)
     Phi_array = ad['Phi'].to_ndarray().reshape(ad.ds.domain_dimensions)
     Ez_array = ad['Ez'].to_ndarray().reshape(ad.ds.domain_dimensions)
 
-    idx_fede_lo = 20        # int(inputs['FE_lo'] / inputs['dz'])
-    idx_fede_hi = 21        # idx_fede_lo + 1
-    idx_sc_hi = 19          # int(inputs['SC_hi'] / inputs['dz']) - 1
-    l = inputs['l']
+    dz = inputs['FE_hi'][2] / inputs['domain.n_cell'][2]
+    idx_fede_lo = int(inputs['FE_lo'][2] / dz)
+    idx_fede_hi = idx_fede_lo + 1
+    idx_sc_hi = int(inputs['SC_hi'][2] / dz) - 1
+    lx = inputs['SC_hi'][0] - inputs['SC_lo'][0]
+    ly = inputs['SC_hi'][1] - inputs['SC_lo'][1]
 
     epsilon_0 = inputs['epsilon_0']
     epsilon_de = inputs['epsilon_de']
 
     x = np.linspace(inputs['domain.prob_lo'][0], inputs['domain.prob_hi'][0], inputs['domain.n_cell'][0])
+    y = np.linspace(inputs['domain.prob_lo'][1], inputs['domain.prob_hi'][1], inputs['domain.n_cell'][1])
 
     #Calculate V_fe_avg
     V_FeDe = 0.5 * (Phi_array[:, :, idx_fede_lo] + Phi_array[:, :, idx_fede_hi])
-    # V_FeDe = Phi_array[:,:,index_fede_lo]
-    integral_V = 1 / l * 1 / l * np.trapz(np.trapz(V_FeDe, x), x)
+    integral_V = (1 / lx) * (1 / ly) * np.trapz(np.trapz(V_FeDe, y), x)
     V_fe_avg = V_app - integral_V
 
     #Calculate Q
     Ez_FeDe = 0.5 * (Ez_array[:, :, idx_fede_lo] + Ez_array[:, :, idx_fede_hi])
     P_FeDe = 0.5 * (P_array[:, :, idx_fede_lo] + P_array[:, :, idx_fede_hi])
     D_FeDe = epsilon_0 * epsilon_de * Ez_FeDe + P_FeDe
-    Q = -1 / l * 1 / l * np.trapz(np.trapz(D_FeDe, x), x)
+    Q = -1 * (1 / lx) * (1 / ly) * np.trapz(np.trapz(D_FeDe, y), x)
 
     #Calculate Surface potential
     V_Sc = Phi_array[:, :, idx_sc_hi]
     Phi_S = np.mean(V_Sc)     # Prabhat had this stored in variable xsi
 
     return V_fe_avg, Q, Phi_S
-
-
-def parse_val(val):
-    try:
-        return float(val) if '.' in val or 'e' in val else int(val)
-    except:
-        return val
-
-def read_inputs(inputs_path):
-    ret = dict()
-    with open(f'{inputs_path}', 'r') as f:
-        for line in map(lambda x: x.strip(), f):
-            if len(line) == 0:
-                continue
-            key, val = re.split('\s*=\s*', line)
-            val = [parse_val(_) for _ in re.split('\s+', val)]
-            if len(val) == 1:
-                val = val[0]
-            ret[key] = val
-    return ret
 
 
 def copy_keys(src, dest):
@@ -147,16 +115,65 @@ def new_inputs(dp, constants):
 
     inputs['domain.prob_lo'] = [ -x, -y, 0.0 ]
     inputs['domain.prob_hi'] = [  x,  y, inputs['FE_hi'][2] ]
-    inputs['domain.n_cell'] = [int((inputs['domain.prob_hi'][i] - inputs['domain.prob_lo'][i]) / 0.5e-9) for i in range(len(inputs['domain.prob_lo']))]
+    inputs['domain.n_cell'] = [int((inputs['domain.prob_hi'][0] - inputs['domain.prob_lo'][0]) / 0.5e-9),
+                               int((inputs['domain.prob_hi'][1] - inputs['domain.prob_lo'][1]) / 0.5e-9),
+                               int((inputs['domain.prob_hi'][2] - inputs['domain.prob_lo'][2]) / 0.5e-9)]
+
+    inputs['domain.max_grid_size'] = inputs['domain.n_cell'].copy()
+    inputs['domain.blocking_factor'] = inputs['domain.n_cell'].copy()
 
     inputs.update(constants)
-
     copy_keys(dp, inputs)
 
     return inputs
 
 
-def read_ferroX_data(data_dir, inputs_name, ignore_cache=False):
+def load_ferrox_dir(design_dir, inputs_name='inputs', min_perc_it=0.0, ignore_cache=False):
+    inputs_path = f"{design_dir}/{inputs_name}"
+    if not os.path.exists(inputs_path):
+        raise ValueError(f"Could not find inputs file {inputs_name} in {design_dir}")
+    inputs = read_inputs(inputs_path)
+    inputs_tmpl = inputs.copy()
+
+    V_app = np.arange(inputs['Phi_Bc_lo'],
+                     inputs['Phi_Bc_hi_max'],
+                     inputs['Phi_Bc_inc'])
+
+    plots = list(sorted(glob.glob(f"{design_dir}/plt*")))[1:]
+    if len(V_app) != len(plots):
+        if (len(plots) / len(V_app)) < min_perc_it:
+            msg = (f"Skipping {design_dir} - "
+                   f"Expected {len(V_app)} plots, got {len(plots)}")
+            warnings.warn(msg)
+            return None, None, None, None, None
+        else:
+            V_app = V_app[:len(plots)]
+
+    cache_path = f"{design_dir}/bayes-opt.npz"
+    if os.path.exists(cache_path) and not ignore_cache:
+        npz = np.load(cache_path)
+        Q = npz['Q']
+        V_fe_avg = npz['V_fe_avg']
+        Phi_S = npz['Phi_S']
+    else:
+        Q = list()
+        V_fe_avg = list()
+        Phi_S = list()
+
+        for _V_app, i in zip(V_app, plots):
+            if 'old' in i:
+                continue
+            it = int(i.split('/')[-1][3:])
+
+            _V_fe_avg, _Q, _Phi_S = calculate_values(i, _V_app, inputs)
+
+            Q.append(_Q)
+            V_fe_avg.append(_V_fe_avg)
+            Phi_S.append(_Phi_S)
+    return inputs, V_app, Q, V_fe_avg, Phi_S
+
+
+def read_ferroX_data(data_dir, inputs_name, ignore_cache=False, min_perc_it=0.75):
     """
     Read FerroX data
 
@@ -193,77 +210,33 @@ def read_ferroX_data(data_dir, inputs_name, ignore_cache=False):
     inputs_tmpl = None
 
     for design_dir in it:
-        inputs_path = f"{design_dir}/{inputs_name}"
-        if not os.path.exists(inputs_path):
+
+        inputs, V_app, Q, V_fe_avg, Phi_S = load_ferrox_dir(design_dir, inputs_name=inputs_name,
+                                                            ignore_cache=ignore_cache, min_perc_it=min_perc_it)
+        if inputs is None:
             continue
-        inputs = read_inputs(inputs_path)
-        inputs_tmpl = inputs.copy()
-        inputs.setdefault('l', 32e9)
-
-        V_app = np.arange(inputs['Phi_Bc_lo'],
-                          inputs['Phi_Bc_hi_max'],
-                          inputs['Phi_Bc_inc'])
-
-        plots = list(sorted(glob.glob(f"{design_dir}/plt*")))[1:]
-        if len(V_app) != len(plots):
-            if (len(plots) / len(V_app)) < 0.75:
-                msg = (f"Skipping {design_dir} - "
-                       f"Expected {len(V_app)} plots, got {len(plots)}")
-                warnings.warn(msg)
-                continue
-            else:
-                V_app = V_app[:len(plots)]
-
 
         design_params.append(get_design_params(inputs))
-        cache_path = f"{design_dir}/bayes-opt.npz"
-        if os.path.exists(cache_path) and not ignore_cache:
-            npz = np.load(cache_path)
-            Q = npz['Q']
-            V_fe_avg = npz['V_fe_avg']
-            Phi_S = npz['Phi_S']
-        else:
-            Q = list()
-            V_fe_avg = list()
-            Phi_S = list()
-
-            for _V_app, i in zip(V_app, plots):
-                if 'old' in i:
-                    continue
-                it = int(i.split('/')[-1][3:])
-
-                ds = yt.load(i)
-                ad = ds.all_data()
-
-                _V_fe_avg, _Q, _Phi_S = calculate_values(ad, _V_app, inputs)
-
-                Q.append(_Q)
-                V_fe_avg.append(_V_fe_avg)
-                Phi_S.append(_Phi_S)
-
-            np.savez(cache_path, Q=Q, V_fe_avg=V_fe_avg, Phi_S=Phi_S)
+        np.savez(f"{design_dir}/bayes-opt.npz", Q=Q, V_fe_avg=V_fe_avg, Phi_S=Phi_S)
 
         all_V_app.append(np.array(V_app))
         all_Q.append(np.array(Q))
         all_V_fe_avg.append(np.array(V_fe_avg))
         all_Phi_S.append(np.array(Phi_S))
 
+        inputs_tmpl = inputs.copy()
+
     design_params = pd.DataFrame(data=design_params)
-    V_app = np.array(all_V_app)
-    Q = np.array(all_Q)
-    V_fe_avg = np.array(all_V_fe_avg)
-    Phi_S = np.array(all_Phi_S)
+
+    V_app = tuple(all_V_app)
+    Q = tuple(all_Q)
+    V_fe_avg = tuple(all_V_fe_avg)
+    Phi_S = tuple(all_Phi_S)
 
     return design_params, V_app, Q, V_fe_avg, Phi_S, inputs_tmpl
 
 
-def round_sample(new_sample, resolutions):
-    for k in ('L_z_SC', 'L_z_DE', 'L_z_FE', 'L_x', 'L_y'):
-        res = 1 / resolutions[k]
-        new_sample[k] = round(new_sample[k] * res) / res
-
-
-def get_next_sample(design_params, response, bounds_df, maximize=True):
+def get_next_sample(design_params, response, bounds_df, maximize=True, ):
     """
     Fit GaussianProcess to data and return next set of design parameters based on expected improvement.
 
@@ -293,21 +266,16 @@ def get_next_sample(design_params, response, bounds_df, maximize=True):
 
     # 2 - Generate candidate samples
     candidates = np.array([np.random.uniform(low=bounds[:, 0], high=bounds[:, 1]) for _ in range(10)])
-
-    #print(candidates[:, 2])
+    #candidates = np.array([np.random.uniform(low=bounds[:, 0], high=bounds[:, 1]) for _ in range(100)])
 
     y_pred, pred_std = model.predict(scaler.transform(candidates), return_std=True)
 
-    #print(y_pred)
-    #print(pred_std)
-
-
     # 3 - Calculate the EI values of the candidate samples
     if maximize:
-        current_objective = y_pred[np.argmax(y_pred)]
+        current_objective = y_train.max()
         dev = y_pred - current_objective
     else:
-        current_objective = y_pred[np.argmin(y_pred)]
+        current_objective = y_train.min()
         dev = current_objective - y_pred
 
     pred_std = pred_std.reshape(pred_std.shape[0])
@@ -326,112 +294,23 @@ def get_next_sample(design_params, response, bounds_df, maximize=True):
     return new_sample
 
 
-def fmt_param(param):
-    """
-    Format paramters to string representations that FerroX requires in the inputs file
-    """
-    if isinstance(param, list):
-        return " ".join(fmt_param(_) for _ in param)
-    elif isinstance(param, (int, np.int64)):
-        return str(param)
-    elif isinstance(param, (float, np.float64)):
-        if param == 0.0:
-            return '0.0'
-        return f'{param:0.3g}'
-    elif isinstance(param, str):
-        return param
-    else:
-        raise ValueError(f"Got value of type {type(param)}")
-
-
-def submit_workflow(config, inputs, outdir, job_name, data_dir, job_name_prefix="ferroX_",
-                    submit=True, inputs_name="inputc",max_iter=100):
-    """
-    Prepare an inputs file and sbatch script for running the next step and submit job to Slurm.
-
-    Args:
-        config (dict)           : the config options contained in the config file
-        inputs (dict)           : the value of the inputs to use
-        job_name (str)          : the job name to use when submitting to Slurm
-        data_dir (str)          : the path to the data directory to save the FerroX run. This should be the same directory
-                                  that the the FerroX data came from
-        job_name_prefix (str)   : a prefix to append to job_name when submitting to Slurm
-        submit (bool)           : submit job to Slurm if True, else print input and sbatch script to standard output
-        inputs_name (str)       : the name of the file to write the inputs file to
-        max_iter (int)          : the maximum number of FerroX runs to do
-    """
-    inputs_f = tempfile.NamedTemporaryFile('w', prefix='inputs')
-    inputs_path = inputs_f.name
-    for k in inputs:
-        print(f"{k} = {fmt_param(inputs[k])}", file=inputs_f)
-    inputs_f.flush()
-
-    sh_f = tempfile.NamedTemporaryFile('w', suffix='.sh')
-    sh_path = sh_f.name
-    base_outdir = os.path.join(outdir, job_name)
-    write_job(config, sh_f, base_outdir, data_dir, job_name=f"{job_name_prefix}{job_name}", inputs_name=inputs_name, max_iter=max_iter)
-    sh_f.flush()
-
-    outdir = sh_path
-
-    jobid = None
-    if submit:
-        jobid = _submit_job(sh_path)
-        print(f"Submitted job {jobid}", file=sys.stderr)
-        if jobid == -1:
-            exit()
-        outdir = f"{base_outdir}.{jobid}"
-
-        os.makedirs(outdir)
-        dest_sh = f"{outdir}/run.sh"
-        dest_inputs = f"{outdir}/{inputs_name}"
-        shutil.copyfile(sh_path, dest_sh)
-        shutil.copyfile(inputs_path, dest_inputs)
-        print(f"Copied submission script to {dest_sh}", file=sys.stderr)
-        print(f"Copied inputs file to {dest_inputs}", file=sys.stderr)
-    else:
-        with open(inputs_path, 'r') as f:
-            print(f.read())
-        print()
-        with open(sh_path, 'r') as f:
-            print(f.read())
-
-
-def _submit_job(path):
-    """A helper function for submitting a FerroX job"""
-    cmd = f'sbatch {path}'
-    print(cmd)
-    output = subprocess.check_output(
-                cmd,
-                stderr=subprocess.STDOUT,
-                shell=True).decode('utf-8')
-
-    result = re.search('Submitted batch job (\d+)', output)
-    if result is not None:
-        ret = int(result.groups(0)[0])
-    else:
-        print(f'Job submission failed: {output}', file=sys.stderr)
-        ret = -1
-    return ret
-
-
-def run(config_path, data_dir, outdir, seed, job_prefix="ferroX_", inputs_name="inputc", debug=False, max_iter=100, ignore_cache=False):
+def run(config_path, data_dir, outdir, seed, job_prefix="ferroX_", inputs_name="inputc", debug=False, max_iter=100,
+        min_perc_it=0.75, ignore_cache=False, **extra_kwargs):
     """A helper function to call from main"""
     print(f"Using seed {seed}", file=sys.stderr)
     print("Reading FerroX data", file=sys.stderr)
     design_params, V_app, Q, V_fe_avg, Phi_S, inputs_tmpl = read_ferroX_data(data_dir, inputs_name,
+                                                                             min_perc_it=min_perc_it,
                                                                              ignore_cache=ignore_cache)
     print("done", file=sys.stderr)
 
+    obj = DPhiSOverDVapp()
 
     # Read the config file
-    with open(config_path, 'rb') as f:
-        config = tomllib.load(f)
+    config = load_config(config_path)
 
-    # The domain of the design parameters
-    range_df = pd.DataFrame(config['param']).T
-    # FerroX constants for
-    constants = config.get('constants', dict())
+    # The domain of the design parameters and FerroX constants
+    range_df, constants = get_input_params(config)
 
     it = len(V_app)
     if it > 0:
@@ -441,8 +320,7 @@ def run(config_path, data_dir, outdir, seed, job_prefix="ferroX_", inputs_name="
             return
 
         # Calculate the value of the objective function for each run of FerroX
-        dPhiS_dVapp = (np.diff(Phi_S) / np.diff(V_app))
-        response = np.max(dPhiS_dVapp, axis=1)
+        response = np.array([obj(_V_app, _Q, _V_fe_avg, _Phi_S)  for _V_app, _Q, _V_fe_avg, _Phi_S in zip(V_app, Q, V_fe_avg, Phi_S)])
 
         # Get min and max values for design parameters based on what has been run so far
         bounds_df = pd.DataFrame([design_params.min(axis=0), design_params.max(axis=0)], index=['min', 'max']).T
@@ -455,7 +333,7 @@ def run(config_path, data_dir, outdir, seed, job_prefix="ferroX_", inputs_name="
         next_params = get_next_sample(design_params, response, bounds_df)
     else:
         print("No iterations found, starting from scratch", file=sys.stderr)
-        inputs_tmpl = read_inputs(files(__package__).joinpath("inputs"))
+        inputs_tmpl = get_default_inputs()
         try:
             next_params = pd.Series(np.random.uniform(low=range_df['min'], high=range_df['max']), range_df.index)
             round_sample(next_params, range_df['step'])
@@ -470,17 +348,16 @@ def run(config_path, data_dir, outdir, seed, job_prefix="ferroX_", inputs_name="
     inputs_tmpl.update(new_inputs(next_params, constants))
 
     # Write necessary files and submit job to Slurm
-    submit_workflow(config, inputs_tmpl, outdir, f"it{it:05d}", data_dir, job_name_prefix=job_prefix, submit=not debug,
-                    inputs_name=inputs_name, max_iter=max_iter)
+    writer = ChainJobWriter(config, job_time=240, inputs_name="inputc", job_prefix=job_prefix)
+
+    outdir = writer.submit_workflow(inputs_tmpl, outdir, f"it{it:05d}", submit=not debug)
 
     # print new design parameters for the user
-    print("\nDesign params:", file=sys.stderr)
-    for k, v in next_params.items():
-        if k[0] == 'L':
-            v = f"{v / 1e-9:0.4g} nm"
-        else:
-            v = f"{v:0.4g}"
-        print(f"{k:<15}{v}", file=sys.stderr)
+    dparams_path = os.path.join(outdir, 'design_params')
+    with open(dparams_path, 'w') as f:
+        write_params(next_params, f)
+    with open(dparams_path, 'r') as f:
+        print(f.read().strip(), file=sys.stderr)
 
 
 def main(argv=None):
@@ -496,11 +373,16 @@ def main(argv=None):
     parser.add_argument('-j', '--job_prefix', type=str, help='the job name prefix to use', default='ferroX_')
     parser.add_argument('-I', '--max_iter', type=int, help='the maximum number of iterations to do', default=100)
     parser.add_argument('-c', '--ignore_cache', action='store_true', help='ignore processed FerroX data cache', default=False)
+    parser.add_argument('-p', '--min_perc_it', type=float, default=0.75,
+                        help='minimum complete iterations required to use a FerroX run')
 
     args = parser.parse_args(argv)
     if args.outdir is None:
         args.outdir = os.path.abspath(args.data_dir)
 
-
-    run(args.config, args.data_dir, args.outdir, args.seed, job_prefix=args.job_prefix, inputs_name=args.inputs_name,
-        debug=args.debug, max_iter=args.max_iter, ignore_cache=args.ignore_cache)
+    kwargs = vars(args)
+    config = kwargs.pop('config')
+    data_dir = kwargs.pop('data_dir')
+    outdir = kwargs.pop('outdir')
+    seed = kwargs.pop('seed')
+    run(config, data_dir, outdir, seed, **kwargs)
