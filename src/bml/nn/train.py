@@ -1,3 +1,5 @@
+import glob
+
 import lightning as L
 import lightning.pytorch.callbacks as cb
 from lightning.pytorch.cli import LightningCLI
@@ -7,12 +9,20 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
 
 from .unet import UNet
+from .loader import FerroXDataset
 
 
 class LitUNet(L.LightningModule):
-    def __init__(self):
+    """Lightning Module aka Network model"""
+
+    def __init__(self, n_channels=3):
+        """
+        Args:
+            n_channels: The number of values in each FerroX grid. By default,
+                        3 channels are expected i.e. Pz, Ez, Phi
+        """
         super().__init__()
-        self.unet = UNet(3)
+        self.unet = UNet(n_channels)
         self.loss_fcn = nn.MSELoss()
 
     def training_step(self, batch, batch_idx):
@@ -20,6 +30,7 @@ class LitUNet(L.LightningModule):
         X, Y = batch
         output = self.unet(X)
         loss = self.loss_fcn(Y, output)
+        self.log("training_loss", loss)
         return loss
 
     def configure_optimizers(self):
@@ -35,6 +46,17 @@ class LitUNet(L.LightningModule):
 
 
 class TestPlanarDataModule(L.LightningDataModule):
+    """Lightning Data Module"""
+
+    def __init__(self, data_dir_glob, batch_size):
+        """
+        Args:
+            data_dir_glob: The glob string for getting the FerroX run directories to
+                           use for training
+        """
+        super().__init__()
+        self.data_dir_glob = data_dir_glob
+        self.batch_size = batch_size
 
     def prepare_data(self):
         # download, IO, etc. Useful with shared filesystems
@@ -44,21 +66,21 @@ class TestPlanarDataModule(L.LightningDataModule):
     def setup(self, stage):
         # make assignments here (val/train/test split)
         # called on every process in DDP
-        dset = FerroXDataset(glob.glob("/pscratch/sd/a/ajtritt/bml/test_planar/it*")) #
-        self.train, self.val, self.test = data.random_split(
-            dset, [80, 10, 10], generator=torch.Generator().manual_seed(31)
+        dset = FerroXDataset(glob.glob(self.data_dir_glob)) #
+        self.train, self.val, self.test = random_split(
+            dset, [0.8, 0.1, 0.1], generator=torch.Generator().manual_seed(31)
         )
 
     def train_dataloader(self):
-        return data.DataLoader(self.train)
+        return DataLoader(self.train, batch_size=self.batch_size)
 
     def val_dataloader(self):
-        return data.DataLoader(self.val)
+        return DataLoader(self.val)
 
     def test_dataloader(self):
-        return data.DataLoader(self.test)
+        return DataLoader(self.test)
 
-    def teardown(self):
+    def teardown(self, stage):
         # clean up state after the trainer stops, delete files...
         # called on every process in DDP
         pass
