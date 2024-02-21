@@ -16,7 +16,7 @@ import yt
 
 from .objective import DPhiSOverDVapp
 from .job import ChainJobWriter
-from .utils import get_input_params, load_config, read_inputs, get_default_inputs, parse_seed, round_sample, write_params
+from .utils import get_input_params, load_config, read_inputs, get_default_inputs, parse_seed, round_sample, write_params, new_inputs, copy_keys
 
 def write_job(config, f, base_outdir, job_name="ferroX", job_time=240, inputs_name="inputc"):
     exe_path = os.path.expandvars(config['exe_path'])
@@ -41,7 +41,31 @@ cd {os.getcwd()}
     f.write(SCRIPT)
 
 
-def calculate_values(plt_path, V_app, inputs, default_l=32e9):
+def write_array_job(config, f, base_outdir, n_tasks, job_name="ferroX", job_time=240, inputs_name="inputc"):
+    exe_path = os.path.expandvars(config['exe_path'])
+    project = config['nersc_project']
+
+    SCRIPT=f"""#!/bin/bash
+#SBATCH -A {project}
+#SBATCH -C gpu
+#SBATCH -q shared
+#SBATCH -t {job_time}
+#SBATCH -c 32
+#SBATCH --gpus-per-task=1
+#SBATCH -n 1
+#SBATCH -e {base_outdir}.%j/error.txt
+#SBATCH -o {base_outdir}.%j/output.txt
+#SBATCH -J {job_name}
+#SBATCH -a 1-{n_tasks}
+cd {base_outdir}.$SLURM_ARRAY_TASK_ID
+export SLURM_CPU_BIND="cores"
+srun {exe_path} {inputs_name}
+cd {os.getcwd()}
+{os.path.basename(sys.argv[0])} {' '.join(sys.argv[1:])}"""
+    f.write(SCRIPT)
+
+
+def calculate_values(plt_path, V_app, inputs, default_l=32e9, Phi_max=True):
     ds = yt.load(plt_path)
     ad = ds.all_data()
 
@@ -76,20 +100,13 @@ def calculate_values(plt_path, V_app, inputs, default_l=32e9):
     Q = -1 * (1 / lx) * (1 / ly) * np.trapz(np.trapz(D_FeDe, y), x)
 
     #Calculate Surface potential
-    V_Sc = Phi_array[:, :, idx_sc_hi]
-    Phi_S = np.mean(V_Sc)     # Prabhat had this stored in variable xsi
+    Phi_S = Phi_array[:, :, idx_sc_hi]
 
     return V_fe_avg, Q, Phi_S
 
 
-def copy_keys(src, dest):
-    for k in ('alpha', 'beta', 'gamma', 'g11', 'g44', 'epsilon_de', 'epsilon_si', 'epsilonZ_fe'):
-        if k not in src:
-            continue
-        dest[k] = src[k]
-
-
 def get_design_params(inputs):
+    """Extract design parameters from inputs"""
     ret = dict()
     ret['L_z_SC'] = inputs['SC_hi'][2] - inputs['SC_lo'][2]
     ret['L_z_DE'] = inputs['DE_hi'][2] - inputs['DE_lo'][2]
@@ -100,41 +117,14 @@ def get_design_params(inputs):
     return ret
 
 
-def new_inputs(dp, constants):
-    inputs = dict()
-
-    x = dp['L_x'] / 2
-    y = dp['L_y'] / 2
-
-    inputs['SC_lo'] = [ -x, -y, 0.0 ]
-    inputs['SC_hi'] = [  x,  y, dp['L_z_SC'] ]
-    inputs['DE_lo'] = [ -x, -y, inputs['SC_hi'][2] ]
-    inputs['DE_hi'] = [  x,  y, inputs['DE_lo'][2] + dp['L_z_DE'] ]
-    inputs['FE_lo'] = [ -x, -y, inputs['DE_hi'][2] ]
-    inputs['FE_hi'] = [  x,  y, inputs['FE_lo'][2] + dp['L_z_FE'] ]
-
-    inputs['domain.prob_lo'] = [ -x, -y, 0.0 ]
-    inputs['domain.prob_hi'] = [  x,  y, inputs['FE_hi'][2] ]
-    inputs['domain.n_cell'] = [int((inputs['domain.prob_hi'][0] - inputs['domain.prob_lo'][0]) / 0.5e-9),
-                               int((inputs['domain.prob_hi'][1] - inputs['domain.prob_lo'][1]) / 0.5e-9),
-                               int((inputs['domain.prob_hi'][2] - inputs['domain.prob_lo'][2]) / 0.5e-9)]
-
-    inputs['domain.max_grid_size'] = inputs['domain.n_cell'].copy()
-    inputs['domain.blocking_factor'] = inputs['domain.n_cell'].copy()
-
-    inputs.update(constants)
-    copy_keys(dp, inputs)
-
-    return inputs
-
-
-def load_ferrox_dir(design_dir, inputs_name='inputs', min_perc_it=0.0, ignore_cache=False):
+def load_ferrox_dir(design_dir, inputs_name='inputs', min_perc_it=0.0, ignore_cache=False, Phi_max=True):
     inputs_path = f"{design_dir}/{inputs_name}"
     if not os.path.exists(inputs_path):
         raise ValueError(f"Could not find inputs file {inputs_name} in {design_dir}")
     inputs = read_inputs(inputs_path)
     inputs_tmpl = inputs.copy()
 
+    # ^step = \d+
     V_app = np.arange(inputs['Phi_Bc_lo'],
                      inputs['Phi_Bc_hi_max'],
                      inputs['Phi_Bc_inc'])
@@ -165,21 +155,26 @@ def load_ferrox_dir(design_dir, inputs_name='inputs', min_perc_it=0.0, ignore_ca
                 continue
             it = int(i.split('/')[-1][3:])
 
-            _V_fe_avg, _Q, _Phi_S = calculate_values(i, _V_app, inputs)
+            ret = calculate_values(i, _V_app, inputs, Phi_max=Phi_max)
+
+            _V_fe_avg, _Q, _Phi_S = ret
 
             Q.append(_Q)
             V_fe_avg.append(_V_fe_avg)
             Phi_S.append(_Phi_S)
+
+    np.savez(cache_path, Q=Q, V_fe_avg=V_fe_avg, Phi_S=Phi_S)
+
     return inputs, V_app, Q, V_fe_avg, Phi_S
 
 
-def read_ferroX_data(data_dir, inputs_name, ignore_cache=False, min_perc_it=0.75):
+def read_ferroX_data(data_dir, **kwargs):
     """
     Read FerroX data
 
     Args:
         data_dir        : the directory containing the FerroX runs to use for training
-        inputs_name     : the name of the inputs file
+        kwargs          : additional arguments for load_ferrox_dir
         ignore_cache    : ignore cached preprocessed FerroX data. This data is stored in each directory in the file
                           named 'bayes-opt.npz'
 
@@ -197,7 +192,7 @@ def read_ferroX_data(data_dir, inputs_name, ignore_cache=False, min_perc_it=0.75
     all_names = list()
     all_data = list()
 
-    it = sorted(glob.glob(f"{data_dir}/*"))
+    it = sorted(glob.glob(f"{data_dir}/it*"))
     it = tqdm.tqdm(it, file=sys.stderr)
 
     all_V_app = list()
@@ -211,13 +206,11 @@ def read_ferroX_data(data_dir, inputs_name, ignore_cache=False, min_perc_it=0.75
 
     for design_dir in it:
 
-        inputs, V_app, Q, V_fe_avg, Phi_S = load_ferrox_dir(design_dir, inputs_name=inputs_name,
-                                                            ignore_cache=ignore_cache, min_perc_it=min_perc_it)
+        inputs, V_app, Q, V_fe_avg, Phi_S = load_ferrox_dir(design_dir, **kwargs)
         if inputs is None:
             continue
 
         design_params.append(get_design_params(inputs))
-        np.savez(f"{design_dir}/bayes-opt.npz", Q=Q, V_fe_avg=V_fe_avg, Phi_S=Phi_S)
 
         all_V_app.append(np.array(V_app))
         all_Q.append(np.array(Q))

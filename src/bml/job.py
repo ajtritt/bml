@@ -40,6 +40,25 @@ export SLURM_CPU_BIND="cores"
 srun {self.exe_path} {self.inputs_name}"""
         print(SCRIPT, file=f)
 
+    def write_array_job(self, f, base_outdir, job_name, n_tasks, start_task=0):
+        SCRIPT=f"""#!/bin/bash
+#SBATCH -A {self.project}
+#SBATCH -C gpu
+#SBATCH -q shared
+#SBATCH -t {self.job_time}
+#SBATCH -c 32
+#SBATCH --gpus-per-task=1
+#SBATCH -n 1
+#SBATCH -e {base_outdir}.%a/error.txt
+#SBATCH -o {base_outdir}.%a/output.txt
+#SBATCH -J {job_name}
+#SBATCH -a {start_task}-{start_task + n_tasks - 1}
+printf -v it "%06d" $SLURM_ARRAY_TASK_ID
+cd {base_outdir}/it$it
+export SLURM_CPU_BIND="cores"
+srun {self.exe_path} {self.inputs_name}"""
+        print(SCRIPT, file=f)
+
     @classmethod
     def fmt_param(cls, param):
         """
@@ -62,9 +81,9 @@ srun {self.exe_path} {self.inputs_name}"""
         for k in inputs:
             print(f"{k} = {self.fmt_param(inputs[k])}", file=f)
 
-    def submit_job(self, sh_path, inputs_path, base_outdir):
+    @staticmethod
+    def submit_job(sh_path):
         cmd = f'sbatch {sh_path}'
-        print(cmd)
         output = subprocess.check_output(
                     cmd,
                     stderr=subprocess.STDOUT,
@@ -104,7 +123,7 @@ srun {self.exe_path} {self.inputs_name}"""
 
         jobid = None
         if submit:
-            jobid = self.submit_job(sh_path, inputs_path, base_outdir)
+            jobid = self.submit_job(sh_path)
             outdir = f"{base_outdir}.{jobid}"
         else:
             outdir = f"{base_outdir}.unsubmitted"
