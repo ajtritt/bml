@@ -49,8 +49,8 @@ srun {self.exe_path} {self.inputs_name}"""
 #SBATCH -c 32
 #SBATCH --gpus-per-task=1
 #SBATCH -n 1
-#SBATCH -e {base_outdir}.%a/error.txt
-#SBATCH -o {base_outdir}.%a/output.txt
+#SBATCH -e {base_outdir}/it%6a/error.txt
+#SBATCH -o {base_outdir}/it%6a/output.txt
 #SBATCH -J {job_name}
 #SBATCH -a {start_task}-{start_task + n_tasks - 1}
 printf -v it "%06d" $SLURM_ARRAY_TASK_ID

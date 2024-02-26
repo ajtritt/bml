@@ -34,6 +34,8 @@ def read_inputs(inputs_path):
         for line in map(lambda x: x.strip(), f):
             if len(line) == 0:
                 continue
+            if line[0] == '#':
+                continue
             key, val = re.split('\s*=\s*', line)
             val = [_parse_val(_) for _ in re.split('\s+', val)]
             if len(val) == 1:
@@ -73,3 +75,39 @@ def write_params(design_params, f):
         else:
             v = f"{v:0.4g}"
         print(f"{k:<15}{v}", file=f)
+
+
+def copy_keys(src, dest):
+    for k in ('alpha', 'beta', 'gamma', 'g11', 'g44', 'epsilon_de', 'epsilon_si', 'epsilonZ_fe'):
+        if k not in src:
+            continue
+        dest[k] = src[k]
+
+
+def new_inputs(dp, constants):
+    """Copy design parameters to inputs """
+    inputs = dict()
+
+    x = dp['L_x'] / 2
+    y = dp['L_y'] / 2
+
+    inputs['SC_lo'] = [ -x, -y, 0.0 ]
+    inputs['SC_hi'] = [  x,  y, dp['L_z_SC'] ]
+    inputs['DE_lo'] = [ -x, -y, inputs['SC_hi'][2] ]
+    inputs['DE_hi'] = [  x,  y, inputs['DE_lo'][2] + dp['L_z_DE'] ]
+    inputs['FE_lo'] = [ -x, -y, inputs['DE_hi'][2] ]
+    inputs['FE_hi'] = [  x,  y, inputs['FE_lo'][2] + dp['L_z_FE'] ]
+
+    inputs['domain.prob_lo'] = [ -x, -y, 0.0 ]
+    inputs['domain.prob_hi'] = [  x,  y, inputs['FE_hi'][2] ]
+    inputs['domain.n_cell'] = [int((inputs['domain.prob_hi'][0] - inputs['domain.prob_lo'][0]) / 0.5e-9),
+                               int((inputs['domain.prob_hi'][1] - inputs['domain.prob_lo'][1]) / 0.5e-9),
+                               int((inputs['domain.prob_hi'][2] - inputs['domain.prob_lo'][2]) / 0.5e-9)]
+
+    inputs['domain.max_grid_size'] = inputs['domain.n_cell'].copy()
+    inputs['domain.blocking_factor'] = inputs['domain.n_cell'].copy()
+
+    inputs.update(constants)
+    copy_keys(dp, inputs)
+
+    return inputs
