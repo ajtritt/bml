@@ -1,16 +1,15 @@
+import os
 import glob
 
-import os
-
-import yt
 import numpy as np
-
+import pandas as pd
+from sklearn.preprocessing import StandardScaler
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 from torch.utils.data import Dataset
+import yt
 
-import lightning as L
+from .utils import easy_pad
+from ..bayes_opt import read_inputs, get_design_params
 
 
 def load_timepoint(plt_path, use_cache=True):
@@ -29,20 +28,8 @@ def load_timepoint(plt_path, use_cache=True):
     return ret
 
 
-def easy_pad(t, tgt_shape=(200, 200, 52)):
-    if t.shape[-3:] == tgt_shape:
-        return t
-    diff = [tgt - st for (tgt, st) in zip(tgt_shape[::-1], t.shape[::-1])]
-    pad_arg = list()
-    for d in diff:
-        q, r = divmod(d, 2)
-        pad_arg.append(q + r)
-        pad_arg.append(q)
-    return F.pad(t, pad_arg, 'constant', 0)
-
-
-
 class FerroXDataset(Dataset):
+
     def __init__(self, directories, max_gate_shape=(200, 200, 52)):
         self.X = list()
         self.Y = list()
@@ -59,3 +46,45 @@ class FerroXDataset(Dataset):
         X = easy_pad(load_timepoint(self.X[arg]), self.max_gate_shape)
         Y = easy_pad(load_timepoint(self.Y[arg]), self.max_gate_shape)
         return X, Y
+
+
+class InitFerroXDataset(Dataset):
+
+    def __init__(self, directories, max_gate_shape=(200, 200, 52), return_inputs=False):
+        self.return_inputs = return_inputs
+        self.X = list()
+        self.Y = list()
+        self.max_gate_shape = max_gate_shape
+        for run_dir in directories:
+            states = sorted(glob.glob(f"{run_dir}/plt*"))
+            if len(states) > 1:
+                initial_state = easy_pad(load_timepoint(states[1]), self.max_gate_shape)
+            else:
+                continue
+            design_params = get_design_params(read_inputs(f"{run_dir}/inputs"))
+            self.X.append(design_params)
+            self.Y.append(initial_state)
+
+        scaler = StandardScaler()
+
+        self.X = pd.DataFrame(self.X).values
+
+        self.X = torch.tensor(scaler.fit_transform((np.array(self.X))))
+        # This is not concatenating all the tensors in Y to create a new dimension.
+
+        self.Y = torch.stack(self.Y)
+
+        self.X_mean = scaler.mean_
+        self.X_std = np.sqrt(scaler.var_)
+
+
+    def __len__(self):
+        return len(self.X)
+
+
+    def __getitem__(self, arg):
+        ret = []
+        if self.return_inputs:
+            ret.append(self.X[arg])
+        ret.append(self.Y[arg])
+        return tuple(ret)

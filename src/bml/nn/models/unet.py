@@ -1,4 +1,10 @@
+import torch
 import torch.nn as nn
+from torch.utils.data import DataLoader, random_split
+
+import lightning as L
+
+from ..utils import easy_pad
 
 
 class DoubleConv(nn.Module):
@@ -95,6 +101,13 @@ class UNet(nn.Module):
         self.up4 = (Up(128, 64, bilinear))
         self.outc = (OutConv(64, n_channels))
 
+        for m in self.modules():
+            if isinstance(m, nn.Conv3d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, (nn.BatchNorm3d, nn.GroupNorm)):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+
     def forward(self, x):
         x1 = self.inc(x)
         x2 = self.down1(x1)
@@ -107,3 +120,79 @@ class UNet(nn.Module):
         x = self.up4(x, x1)
         logits = self.outc(x)
         return logits
+
+
+# Add Lightning classes so we can plug in to the Lighting CLI
+class LightningModule(L.LightningModule):
+    """Lightning Module aka Network model"""
+
+    def __init__(self, n_channels=3):
+        """
+        Args:
+            n_channels: The number of values in each FerroX grid. By default,
+                        3 channels are expected i.e. Pz, Ez, Phi
+        """
+        super().__init__()
+        self.unet = UNet(n_channels)
+        self.loss_fcn = nn.MSELoss()
+
+    def training_step(self, batch, batch_idx):
+        # training_step defines the train loop.
+        X, Y = batch
+        output = self.unet(X)
+        loss = self.loss_fcn(Y, output)
+        self.log("training_loss", loss)
+        return loss
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
+        return optimizer
+
+    def validation_step(self, batch, batch_idx):
+        # this is the validation loop
+        X, Y = batch
+        output = self.unet(X)
+        val_loss = self.loss_fcn(Y, output)
+        self.log("val_loss", val_loss)
+
+
+class DataModule(L.LightningDataModule):
+    """Lightning Data Module"""
+
+    def __init__(self, data_dir_glob, batch_size):
+        """
+        Args:
+            data_dir_glob: The glob string for getting the FerroX run directories to
+                           use for training
+        """
+        super().__init__()
+        self.data_dir_glob = data_dir_glob
+        self.batch_size = batch_size
+
+    def prepare_data(self):
+        # download, IO, etc. Useful with shared filesystems
+        # only called on 1 GPU/TPU in distributed
+        pass
+
+    def setup(self, stage):
+        # make assignments here (val/train/test split)
+        # called on every process in DDP
+        dset = FerroXDataset(glob.glob(self.data_dir_glob)) #
+        self.train, self.val, self.test = random_split(
+            dset, [0.8, 0.1, 0.1], generator=torch.Generator().manual_seed(31)
+        )
+
+    def train_dataloader(self):
+        return DataLoader(self.train, batch_size=self.batch_size)
+
+    def val_dataloader(self):
+        return DataLoader(self.val)
+
+    def test_dataloader(self):
+        return DataLoader(self.test)
+
+    def teardown(self, stage):
+        # clean up state after the trainer stops, delete files...
+        # called on every process in DDP
+        pass
+
