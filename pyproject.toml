@@ -45,3 +45,5 @@ bml = ["inputs"]
 [project.scripts]
 bayes-opt = "bml.bayes_opt:main"
 bayes-opt-init = "bml.init:main"
+sgt-train = "bml.nn.litrun:main"
+bml-vae-train = "bml.nn.models.vae:main"

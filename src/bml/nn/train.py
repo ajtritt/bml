@@ -9,7 +9,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
 
 from .unet import UNet
-from .loader import FerroXDataset
+from .loader import AutoregressionFerroXDataset
 
 
 class LitUNet(L.LightningModule):
@@ -66,7 +66,7 @@ class TestPlanarDataModule(L.LightningDataModule):
     def setup(self, stage):
         # make assignments here (val/train/test split)
         # called on every process in DDP
-        dset = FerroXDataset(glob.glob(self.data_dir_glob)) #
+        dset = AutoregressionFerroXDataset(glob.glob(self.data_dir_glob)) #
         self.train, self.val, self.test = random_split(
             dset, [0.8, 0.1, 0.1], generator=torch.Generator().manual_seed(31)
         )

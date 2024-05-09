@@ -7,19 +7,22 @@ from torch.utils.data import DataLoader, random_split
 
 import lightning as L
 from lightning.pytorch.loggers import CSVLogger
+import lightning.pytorch.callbacks as cb
 
 from .resnet import resnet10_encoder, resnet10_decoder
-from ..loader import InitFerroXDataset
+from ..loader import FerroXDataset
 
 
 class VAE(nn.Module):
 
-    def __init__(self, device_shape, enc_out_dim=64, latent_dim=32):
+    def __init__(self, device_shape, latent_dim=32):
         super().__init__()
 
         # encoder, decoder
         self.encoder = resnet10_encoder(True, False, layer1_channels=8)
         self.decoder = resnet10_decoder(latent_dim, device_shape, True, False, layer4_channels=latent_dim)
+
+        enc_out_dim = 64
 
         # distribution parameters
         self.fc_mu = nn.Linear(enc_out_dim, latent_dim)
@@ -27,6 +30,15 @@ class VAE(nn.Module):
 
         # for the gaussian likelihood
         self.log_scale = nn.Parameter(torch.Tensor([0.0]))
+
+
+        for m in self.modules():
+            if isinstance(m, nn.Conv3d):
+                nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
+            elif isinstance(m, (nn.BatchNorm3d, nn.GroupNorm)):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+
 
     def gaussian_likelihood(self, x_hat, logscale, x):
         scale = torch.exp(logscale)
@@ -56,6 +68,8 @@ class VAE(nn.Module):
 
     def forward(self, batch, annealer=None):
         #x, _ = batch
+        if len(batch.shape) == 4:
+            batch = batch[None, :]
         x = batch
 
         # encode x to get the mu and variance parameters
@@ -63,13 +77,12 @@ class VAE(nn.Module):
         mu, log_var = self.fc_mu(x_encoded), self.fc_var(x_encoded)
 
         # sample z from q
-        std = torch.exp(log_var / 2)
-        q = torch.distributions.Normal(mu, std)
-        z = q.rsample()
+        std = torch.exp(0.5 * log_var)
+        eps = torch.randn_like(std)
+        z = eps * std + mu
 
         # decoded
         x_hat = self.decoder(z)
-
 
         # reconstruction loss
         recon_loss = self.gaussian_likelihood(x_hat, self.log_scale, x)
@@ -176,7 +189,7 @@ class LitVAE(L.LightningModule):
         self.log('elbo', elbo)
         self.log('recon_loss', recon_loss)
         self.log('kl', kl)
-        return loss
+        return elbo
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
@@ -189,20 +202,20 @@ class LitVAE(L.LightningModule):
         self.log('elbo', elbo)
         self.log('recon_loss', recon_loss)
         self.log('kl', kl)
-        return loss
+        return elbo
 
 
 class LightningDataModule(L.LightningDataModule):
     """Lightning Data Module"""
 
-    def __init__(self, data_dir_glob, max_gate_shape):
+    def __init__(self, data_dir, max_gate_shape):
         """
         Args:
-            data_dir_glob: The glob string for getting the FerroX run directories to
-                           use for training
+            data_dir: the directory containing FerroX run directories
+
         """
         super().__init__()
-        self.data_dir_glob = data_dir_glob
+        self.data_dir = data_dir
         self.max_gate_shape = max_gate_shape
 
     def prepare_data(self):
@@ -213,7 +226,7 @@ class LightningDataModule(L.LightningDataModule):
     def setup(self, stage):
         # make assignments here (val/train/test split)
         # called on every process in DDP
-        dset = InitFerroXDataset(glob.glob(self.data_dir_glob), max_gate_shape=self.max_gate_shape) #
+        dset = FerroXDataset(self.data_dir, max_gate_shape=self.max_gate_shape) #
         self.train, self.val, self.test = random_split(
             dset, [0.8, 0.1, 0.1], generator=torch.Generator().manual_seed(31)
         )
@@ -255,33 +268,38 @@ def main(argv=None):
                         default=False, action='store_true')
     parser.add_argument('-b', '--batch_size', type=int, help='you should not run this code if you need this explained')
     parser.add_argument('-e', '--epochs', type=int, help='you should not run this code if you need this explained')
+    parser.add_argument('-n', '--num_nodes', type=int, help='the number of nodes to run on', default=1)
+    parser.add_argument('-g', '--gpus', type=int, help='the number of GPUs to use', default=1)
     args = parser.parse_args()
 
     if args.checkpoint_dir is None:
         args.checkpoint_dir = args.data_dir
 
 
-    model = LitVAE((200, 200, 52))
-    data = LightningDataModule(f'{args.data_dir}/it*', )
+    max_shape = (200, 200, 52)
+    model = LitVAE(max_shape)
+    data = LightningDataModule(args.data_dir, max_shape)
 
 
     # Init ModelCheckpoint callback, monitoring 'val_loss'
     callbacks = [cb.ModelCheckpoint(monitor='elbo')]
 
     targs = dict(
+            num_nodes=args.num_nodes,
+            devices=args.gpus,
             default_root_dir=args.checkpoint_dir,
             enable_checkpointing=True,
             callbacks=callbacks,
             fast_dev_run=args.sanity,
             accelerator="gpu" if torch.cuda.is_available() else "cpu",
-            devices=1,
             logger=CSVLogger(args.outdir, name=args.experiment),
             #callbacks=[EarlyStopping(monitor=model.val_metric, min_delta=0.001, patience=3, mode="min")])
     )
 
+    print("HELLO", targs)
     # train with both splits
     trainer = L.Trainer(**targs)
-    trainer.fit(model, data_module=data)
+    trainer.fit(model, datamodule=data)
 
 if __name__ == '__main__':
     main()

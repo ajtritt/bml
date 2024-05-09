@@ -1,5 +1,7 @@
 import os
 import glob
+import gzip
+import shutil
 
 import numpy as np
 import pandas as pd
@@ -12,7 +14,23 @@ from .utils import easy_pad
 from ..bayes_opt import read_inputs, get_design_params
 
 
-def load_timepoint(plt_path, use_cache=True):
+def load_timepoint(plt_path, use_cache=True, rm_gz=False):
+    cell_path = os.path.join(plt_path, "Level_0/Cell_D_00000")
+    to_remove = list()
+    if not os.path.exists(cell_path):
+        gz = cell_path + ".gz"
+        if os.path.exists(gz):
+            with gzip.open(gz, 'rb') as f_in:
+                with open(cell_path, 'wb') as f_out:
+                    shutil.copyfileobj(f_in, f_out)
+            to_remove.append(cell_path)
+
+            if rm_gz:
+                to_remove.append(gz)
+        else:
+            if not use_cache:
+                raise ValueError("No Cell_D file find. The only way to read this directory is with use_cache=True")
+
     cache_path = os.path.join(plt_path, 'tensor.pt')
     if use_cache and os.path.exists(cache_path):
         ret = torch.load(cache_path)
@@ -25,10 +43,13 @@ def load_timepoint(plt_path, use_cache=True):
         Ez_array = ad['Ez'].to_ndarray().reshape(ad.ds.domain_dimensions).astype(np.float32)
         ret = torch.tensor(np.array([P_array, Phi_array, Ez_array]))
         torch.save(ret, cache_path)
+
+    for path in to_remove:
+        os.remove(path)
     return ret
 
 
-class FerroXDataset(Dataset):
+class AutoregressionFerroXDataset(Dataset):
 
     def __init__(self, directories, max_gate_shape=(200, 200, 52)):
         self.X = list()
@@ -88,3 +109,46 @@ class InitFerroXDataset(Dataset):
             ret.append(self.X[arg])
         ret.append(self.Y[arg])
         return tuple(ret)
+
+
+class FerroXDataset(Dataset):
+
+    def __init__(self, directory, glob_pattern="it*/plt*", max_gate_shape=(200, 200, 52)):
+        print("running glob")
+        self.plt_dirs = glob.glob(os.path.join(directory, glob_pattern))
+        self.max_gate_shape = max_gate_shape
+
+    def __len__(self):
+        return len(self.plt_dirs)
+
+    def __getitem__(self, arg):
+        pt = os.path.join(self.plt_dirs[arg], 'tensor.pt')
+        if os.path.exists(pt):
+            mesh = torch.load(pt)
+        else:
+            raise ValueError(f"Cannot find preprocessed tensor in {plt}. Please run preformat")
+        if self.max_gate_shape is not None:
+            mesh = easy_pad(mesh, self.max_gate_shape)
+        return mesh
+
+
+class FerroXDataset(Dataset):
+
+    def __init__(self, directory, glob_pattern="it*/plt*", max_gate_shape=(200, 200, 52)):
+        print("running glob")
+        self.plt_dirs = glob.glob(os.path.join(directory, glob_pattern))
+        self.max_gate_shape = max_gate_shape
+
+    def __len__(self):
+        return len(self.plt_dirs)
+
+    def __getitem__(self, arg):
+        pt = os.path.join(self.plt_dirs[arg], 'tensor.pt')
+        if os.path.exists(pt):
+            mesh = torch.load(pt)
+        else:
+            raise ValueError(f"Cannot find preprocessed tensor in {plt}. Please run preformat")
+        if self.max_gate_shape is not None:
+            mesh = easy_pad(mesh, self.max_gate_shape)
+        return mesh
+

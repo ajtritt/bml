@@ -2,6 +2,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F  # noqa: N812
 
+ACT = nn.ReLU6
 
 
 class Interpolate(nn.Module):
@@ -48,7 +49,7 @@ class EncoderBlock(nn.Module):
         super().__init__()
         self.conv1 = conv3x3(inplanes, planes, stride)
         self.bn1 = nn.BatchNorm3d(planes)
-        self.relu = nn.ReLU(inplace=True)
+        self.relu = ACT(inplace=True)
         self.conv2 = conv3x3(planes, planes)
         self.bn2 = nn.BatchNorm3d(planes)
         self.downsample = downsample
@@ -85,7 +86,7 @@ class EncoderBottleneck(nn.Module):
         self.bn2 = nn.BatchNorm3d(width)
         self.conv3 = conv1x1(width, planes * self.expansion)
         self.bn3 = nn.BatchNorm3d(planes * self.expansion)
-        self.relu = nn.ReLU(inplace=True)
+        self.relu = ACT(inplace=True)
         self.downsample = downsample
         self.stride = stride
 
@@ -119,7 +120,7 @@ class DecoderBlock(nn.Module):
         super().__init__()
         self.conv1 = resize_conv3x3(inplanes, inplanes)
         self.bn1 = nn.BatchNorm3d(inplanes)
-        self.relu = nn.ReLU(inplace=True)
+        self.relu = ACT(inplace=True)
         self.conv2 = resize_conv3x3(inplanes, planes, scale)
         self.bn2 = nn.BatchNorm3d(planes)
         self.upsample = upsample
@@ -155,7 +156,7 @@ class DecoderBottleneck(nn.Module):
         self.bn2 = nn.BatchNorm3d(width)
         self.conv3 = conv1x1(width, planes * self.expansion)
         self.bn3 = nn.BatchNorm3d(planes * self.expansion)
-        self.relu = nn.ReLU(inplace=True)
+        self.relu = ACT(inplace=True)
         self.upsample = upsample
         self.scale = scale
 
@@ -194,7 +195,7 @@ class ResNetEncoder(nn.Module):
             self.conv1 = nn.Conv3d(in_channels, self.inplanes, kernel_size=3, stride=1, padding=1, bias=False)
 
         self.bn1 = nn.BatchNorm3d(self.inplanes)
-        self.relu = nn.ReLU(inplace=True)
+        self.relu = ACT(inplace=True)
 
         if self.maxpool1:
             self.maxpool = nn.MaxPool3d(kernel_size=3, stride=2, padding=1)
@@ -206,6 +207,7 @@ class ResNetEncoder(nn.Module):
         self.layer3 = self._make_layer(block, layer1_channels * 4, layers[2], stride=2)
         self.layer4 = self._make_layer(block, layer1_channels * 8, layers[3], stride=2)
         self.avgpool = nn.AdaptiveAvgPool3d((1, 1, 1))
+
 
     def _make_layer(self, block, planes, blocks, stride=1):
         downsample = None
