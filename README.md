@@ -23,14 +23,14 @@ parameter ranges you want to sweep over. An example config file can be found in
 `configs/example.toml`.
 
 The following parameters are available for sweeping:
-- `alpha` - `$\alpha$` Landau free energy coefficient
-- `beta` - `$\beta$` Landau free energy coefficient
-- `gamma` - `$\gamma$` Landau free energy coefficient
+- `alpha` - alpha Landau free energy coefficient
+- `beta` - beta Landau free energy coefficient
+- `gamma` - gamma Landau free energy coefficient
 - `L_z_SC` - semiconductor thickness, in meters
 - `L_z_DE` - dielectric thickness, in meters
 - `L_z_FE` - ferroelectric thickness, in meters
-- `L_x` - device width
-- `L_y` - device length
+- `L_x` - device width, in meters
+- `L_y` - device length, in meters
 - `g11` - `$g_11$` gradient energy coefficient
 - `g44` - `$g_44$` gradient energy coefficient
 
