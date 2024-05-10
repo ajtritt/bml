@@ -1,5 +1,5 @@
 exe_path = "$CFS/m4114/FerroX_executables/main3d.gnu.MPI.CUDA.ex"
-nersc_project = "m4114"
+slurm_project = "m4114"
 
 [constants]
 phi_tolerance = 5e-05

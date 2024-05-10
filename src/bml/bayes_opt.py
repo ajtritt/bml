@@ -20,7 +20,7 @@ from .utils import get_input_params, load_config, read_inputs, get_default_input
 
 def write_job(config, f, base_outdir, job_name="ferroX", job_time=240, inputs_name="inputc"):
     exe_path = os.path.expandvars(config['exe_path'])
-    project = config['nersc_project']
+    project = config['slurm_project']
 
     SCRIPT=f"""#!/bin/bash
 #SBATCH -A {project}
@@ -43,7 +43,7 @@ cd {os.getcwd()}
 
 def write_array_job(config, f, base_outdir, n_tasks, job_name="ferroX", job_time=240, inputs_name="inputc"):
     exe_path = os.path.expandvars(config['exe_path'])
-    project = config['nersc_project']
+    project = config['slurm_project']
 
     SCRIPT=f"""#!/bin/bash
 #SBATCH -A {project}

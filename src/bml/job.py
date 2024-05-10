@@ -18,7 +18,7 @@ class JobWriter:
         """
         self.config = config
         self.exe_path = os.path.expandvars(config['exe_path'])
-        self.project = config['nersc_project']
+        self.project = config['slurm_project']
         self.job_time = job_time
         self.inputs_name = inputs_name
         self.job_prefix  = job_prefix
