@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=45", "setuptools_scm[toml]>=6.2"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bml"
+authors = [
+  { name="Andrew Tritt", email="ajtritt@lbl.gov" },
+]
+description = "A package for managing BML code"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "BSD-3-Clause"}
+classifiers = [
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3.11",
+    "License :: OSI Approved :: BSD License",
+    "Development Status :: 2 - Pre-Alpha",
+    "Operating System :: OS Independent",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
+keywords = [
+    "python",
+]
+
+dependencies = [
+    "matplotlib",
+    "scikit-learn",
+    "seaborn",
+    "scipy",
+    "h5py>=3.7",
+    "numpy",
+    "ipykernel",
+    "pandas",
+    "yt",
+]
+
+dynamic = ["version"]
+
+[tool.setuptools.package-data]
+bml = ["inputs"]
+
+[project.scripts]
+bayes-opt = "bml.bayes_opt:main"
+ferrox-sweep = "bml.init:main"
