@@ -68,6 +68,11 @@ options:
 
 ## Bayesian Optimization
 
+**This feature is in beta -- Use with caution**
+
+This package also contains the `bayes-opt` command for 
+running Bayesian Optimization using Gaussian process regression
+
 ```
 usage: bayes-opt [-h] [-s SEED] [-o OUTDIR] [-d] [-i INPUTS_NAME]
                  [-j JOB_PREFIX] [-I MAX_ITER] [-c] [-p MIN_PERC_IT]
