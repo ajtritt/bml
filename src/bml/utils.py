@@ -36,6 +36,9 @@ def read_inputs(inputs_path):
                 continue
             if line[0] == '#':
                 continue
+            comment = line.find('#')
+            if comment >= 0:
+                line = line[:comment]
             key, val = re.split('\s*=\s*', line)
             val = [_parse_val(_) for _ in re.split('\s+', val)]
             if len(val) == 1:
