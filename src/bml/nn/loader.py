@@ -8,6 +8,7 @@ import pandas as pd
 from sklearn.preprocessing import StandardScaler
 import torch
 from torch.utils.data import Dataset
+from tqdm import tqdm
 import yt
 
 from .utils import easy_pad
@@ -114,7 +115,6 @@ class InitFerroXDataset(Dataset):
 class FerroXDataset(Dataset):
 
     def __init__(self, directory, glob_pattern="it*/plt*", max_gate_shape=(200, 200, 52)):
-        print("running glob")
         self.plt_dirs = glob.glob(os.path.join(directory, glob_pattern))
         self.max_gate_shape = max_gate_shape
 
@@ -132,11 +132,10 @@ class FerroXDataset(Dataset):
         return mesh
 
 
-class FerroXDataset(Dataset):
+class FerroXDataset2D(Dataset):
 
-    def __init__(self, directory, glob_pattern="it*/plt*", max_gate_shape=(200, 200, 52)):
-        print("running glob")
-        self.plt_dirs = glob.glob(os.path.join(directory, glob_pattern))
+    def __init__(self, directory, glob_pattern="it*/plt*", max_gate_shape=(200, 200)):
+        self.plt_dirs = sorted(glob.glob(os.path.join(directory, glob_pattern)))
         self.max_gate_shape = max_gate_shape
 
     def __len__(self):
@@ -146,9 +145,9 @@ class FerroXDataset(Dataset):
         pt = os.path.join(self.plt_dirs[arg], 'tensor.pt')
         if os.path.exists(pt):
             mesh = torch.load(pt)
+            surface = mesh[:, :, :, -1][:2]
         else:
             raise ValueError(f"Cannot find preprocessed tensor in {plt}. Please run preformat")
         if self.max_gate_shape is not None:
-            mesh = easy_pad(mesh, self.max_gate_shape)
-        return mesh
-
+            surface = easy_pad(surface, self.max_gate_shape)
+        return surface
