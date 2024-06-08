@@ -39,6 +39,8 @@ def main():
     parser.add_argument("ferrox_base_dir", help="this should look something like 'it00000'")
     parser.add_argument("-H", "--hpss_loc", help="location on HPSS to get tar from",
                         default="/home/a/ajtritt/projects/bml/init_model/training_data")
+    parser.add_argument("-N", "--no_backup", action='store_true', default=False,
+                        help="do not backup to HPSS after preformatting")
     parser.add_argument("-q", "--quiet", action='store_true', default=False,
                         help="do not print progress information")
     parser.add_argument("-p", "--n_proc", help="the number of processes to use",
@@ -47,9 +49,10 @@ def main():
 
     args = parser.parse_args()
 
+    tar_path = os.path.join(args.hpss_loc, os.path.basename(args.ferrox_base_dir)) + ".tar"
+
     try:
         if not os.path.exists(args.ferrox_base_dir):
-            tar_path = os.path.join(args.hpss_loc, args.ferrox_base_dir) + ".tar"
             cmd = f"htar -xf {tar_path}"
             if not args.quiet:
                 print(f"Retrieving contents of {tar_path} from HPSS")
@@ -72,6 +75,15 @@ def main():
             map_func = pool.map
 
         result = map_func(process_plt, it)
+
+        if not args.no_backup:
+            cmd = f"htar -cf {tar_path} {args.ferrox_base_dir}"
+            if not args.quiet:
+                print(f"Backing up contents of {args.ferrox_base_dir} to {tar_path} on HPSS")
+            output = subprocess.check_output(
+                        cmd,
+                        stderr=subprocess.STDOUT,
+                        shell=True).decode('utf-8')
 
     except Exception as e:
         print(f"FINISHED\t{args.ferrox_base_dir}\tFAILURE\t{e}")
