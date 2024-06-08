@@ -1,7 +1,7 @@
 import torch.nn.functional as F
 
-def easy_pad(t, tgt_shape=(200, 200, 52)):
-    if t.shape[-3:] == tgt_shape:
+def easy_pad(t, tgt_shape):
+    if t.shape[-len(tgt_shape):] == tgt_shape:
         return t
     diff = [tgt - st for (tgt, st) in zip(tgt_shape[::-1], t.shape[::-1])]
     pad_arg = list()
